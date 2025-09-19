@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flashcards (Local)</title>
+  <style>
+    :root{--bg:#0f172a;--panel:#111827;--muted:#334155;--text:#e5e7eb;--accent:#60a5fa;--accent2:#34d399;--warn:#f59e0b;--danger:#ef4444}
+    *{box-sizing:border-box} html,body{height:100%} body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Helvetica,Arial,sans-serif;background:linear-gradient(120deg,#0b1223,#0e152b 60%,#0b1325);color:var(--text)}
+    .container{max-width:980px;margin:0 auto;padding:24px}
+    .toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+    .panel{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:16px}
+    .btn{appearance:none;border:none;border-radius:12px;padding:10px 14px;font-weight:600;cursor:pointer;transition:.15s transform,.15s opacity;background:#1f2937;color:var(--text);border:1px solid rgba(255,255,255,.08)}
+    .btn:hover{transform:translateY(-1px)}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .btn.primary{background:var(--accent);color:#0b1020;border:none}
+    .btn.success{background:var(--accent2);color:#062016;border:none}
+    .btn.warn{background:var(--warn);color:#231a02;border:none}
+    .btn.danger{background:var(--danger);color:#2a0b0b;border:none}
+    .btn.ghost{background:transparent}
+    .input, textarea, select{width:100%;background:#0b1223;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:10px 12px}
+    textarea{min-height:90px;resize:vertical}
+    .grid{display:grid;gap:12px}
+    .grid.decks{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+    .badge{font-size:12px;opacity:.8}
+    .muted{color:#9ca3af}
+    .headline{font-size:28px;font-weight:800;letter-spacing:.3px;margin:0 0 12px}
+    .sub{opacity:.8;margin:0 0 16px}
+    .list{display:flex;flex-direction:column;gap:10px}
+    .kbd{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background:#0b1223;border:1px solid rgba(255,255,255,.12);border-radius:6px;padding:2px 6px;font-size:12px}
+    .spacer{height:8px}
+    .divider{height:1px;background:rgba(255,255,255,.08);margin:8px 0 16px}
+    .flex{display:flex;gap:8px;align-items:center}
+    .right{margin-left:auto}
+    .center{text-align:center}
+    .progress{height:8px;background:#0b1223;border-radius:999px;border:1px solid rgba(255,255,255,.08);overflow:hidden}
+    .progress > div{height:100%;background:var(--accent)}
+    .pill{padding:2px 8px;border-radius:999px;background:#0b1223;border:1px solid rgba(255,255,255,.12)}
+    a{color:inherit;text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="toolbar">
+      <div class="flex" id="breadcrumbs"></div>
+      <div class="flex right">
+        <button class="btn" id="btn-import">Import</button>
+        <button class="btn" id="btn-export">Export</button>
+        <button class="btn" id="btn-dark">Toggle Theme</button>
+      </div>
+    </div>
+    <div id="app"></div>
+    <div class="spacer"></div>
+    <div class="muted">Shortcuts: <span class="kbd">Space</span> flip · <span class="kbd">1</span>/<span class="kbd">2</span>/<span class="kbd">3</span>/<span class="kbd">4</span> Again/Hard/Good/Easy · <span class="kbd">Ctrl/⌘+Enter</span> save</div>
+  </div>
+
+<script>
+// ---------- Utilities ----------
+const $ = (sel, root=document) => root.querySelector(sel);
+const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
+const uid = () => crypto.randomUUID();
+const now = () => Date.now();
+const day = 24*60*60*1000;
+const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+
+// ---------- Simple IndexedDB wrapper ----------
+const DB_NAME = 'flashcards_local_v1';
+const DB_VERSION = 1;
+let db;
+function openDB(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e)=>{
+      const d = e.target.result;
+      if(!d.objectStoreNames.contains('decks')){
+        d.createObjectStore('decks', { keyPath:'id' });
+      }
+      if(!d.objectStoreNames.contains('cards')){
+        const store = d.createObjectStore('cards', { keyPath:'id' });
+        store.createIndex('byDeck','deckId',{unique:false});
+        store.createIndex('byDue','due',{unique:false});
+      }
+      if(!d.objectStoreNames.contains('meta')){
+        d.createObjectStore('meta', { keyPath:'key' });
+      }
+    };
+    req.onsuccess = ()=>{ db = req.result; resolve(db); };
+    req.onerror = ()=>reject(req.error);
+  });
+}
+function tx(store, mode='readonly'){ return db.transaction(store, mode).objectStore(store); }
+const dbGet = (store, key)=> new Promise((res,rej)=>{ const r = tx(store).get(key); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); });
+const dbAll = (store)=> new Promise((res,rej)=>{ const out=[]; const r = tx(store).openCursor(); r.onsuccess=()=>{ const c=r.result; if(c){ out.push(c.value); c.continue(); } else res(out); }; r.onerror=()=>rej(r.error); });
+const dbPut = (store, val)=> new Promise((res,rej)=>{ const r = tx(store,'readwrite').put(val); r.onsuccess=()=>res(val); r.onerror=()=>rej(r.error); });
+const dbDel = (store, key)=> new Promise((res,rej)=>{ const r = tx(store,'readwrite').delete(key); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error); });
+const dbIndexRange = (store, idx, range)=> new Promise((res,rej)=>{ const out=[]; const r = tx(store).index(idx).openCursor(range); r.onsuccess=()=>{ const c=r.result; if(c){ out.push(c.value); c.continue(); } else res(out); }; r.onerror=()=>rej(r.error); });
+
+// ---------- Data types ----------
+function newDeck(name){ return { id:uid(), name, description:'', createdAt:now(), updatedAt:now() }; }
+function newCard(deckId, front='', back=''){ return { id:uid(), deckId, front, back, createdAt:now(), updatedAt:now(), interval:0, ease:2.5, repetitions:0, due:now() } }
+
+// ---------- SRS logic (SM-2 lite) ----------
+function review(card, grade){ // 0=Again,1=Hard,2=Good,3=Easy
+  let { repetitions, ease, interval } = card;
+  if(grade === 0){
+    repetitions = 0; interval = 1; ease = clamp(ease - 0.2, 1.3, 3.0);
+  } else {
+    repetitions += 1;
+    ease = clamp(ease + (grade === 1 ? 0.0 : grade === 2 ? 0.05 : 0.1), 1.3, 3.0);
+    if(repetitions === 1) interval = 1;
+    else if(repetitions === 2) interval = 3;
+    else interval = Math.round(Math.max(1, interval * ease));
+  }
+  const due = now() + interval*day;
+  return { ...card, repetitions, ease, interval, due, updatedAt: now() };
+}
+
+// ---------- App state & routing ----------
+const state = { route: { name:'home', params:{} }, decks: [], cardsByDeck: new Map(), theme: localStorage.getItem('theme')||'dark' };
+function setTheme(t){ state.theme=t; localStorage.setItem('theme', t); document.documentElement.style.colorScheme = t; document.body.style.background = t==='dark'? 'linear-gradient(120deg,#0b1223,#0e152b 60%,#0b1325)' : '#f8fafc'; document.body.style.color = t==='dark'? 'var(--text)' : '#0b1223'; }
+
+function navigate(name, params={}){ state.route = { name, params }; render(); }
+window.addEventListener('hashchange', ()=>{ const h = location.hash.slice(1); if(!h){navigate('home'); return} const [name, id] = h.split('/'); navigate(name, id?{id}:{}) });
+
+// ---------- Data loading ----------
+async function loadAll(){ state.decks = await dbAll('decks'); state.cardsByDeck = new Map(); const allCards = await dbAll('cards'); for(const c of allCards){ if(!state.cardsByDeck.has(c.deckId)) state.cardsByDeck.set(c.deckId, []); state.cardsByDeck.get(c.deckId).push(c); }
+}
+
+// ---------- Rendering ----------
+function setBreadcrumb(items){ const bc = $('#breadcrumbs'); bc.innerHTML=''; items.forEach((it,i)=>{ const a = document.createElement('a'); a.textContent = it.label; a.href = it.href || 'javascript:void(0)'; a.className='pill'; bc.appendChild(a); if(i<items.length-1){ const sep = document.createElement('span'); sep.textContent = ' › '; sep.className='muted'; bc.appendChild(sep); }
+  });
+}
+
+function render(){ const app = $('#app'); const r = state.route; document.onkeydown = null; if(r.name==='home') return renderHome(app); if(r.name==='deck') return renderDeck(app, r.params.id); if(r.name==='study') return renderStudy(app, r.params.id); }
+
+function renderHome(root){ setBreadcrumb([{label:'Decks'}]);
+  const decks = state.decks.sort((a,b)=>a.name.localeCompare(b.name));
+  root.innerHTML = `
+    <h1 class="headline">Your Decks</h1>
+    <p class="sub">Create decks, add cards, and start studying. Everything is stored locally on this device.</p>
+    <div class="row">
+      <div class="card" style="min-width:260px;flex:1">
+        <h3>Create a deck</h3>
+        <div class="spacer"></div>
+        <input class="input" id="deck-name" placeholder="Deck name"/>
+        <div class="spacer"></div>
+        <button class="btn primary" id="create-deck">Create</button>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="grid decks">
+      ${decks.map(d=>`
+        <div class="panel" style="padding:14px">
+          <div class="flex" style="justify-content:space-between;align-items:center">
+            <a href="#deck/${d.id}" class="flex" style="gap:8px"><strong>${escapeHtml(d.name)}</strong></a>
+            <span class="badge muted">${(state.cardsByDeck.get(d.id)||[]).length} cards</span>
+          </div>
+          <div class="spacer"></div>
+          <div class="flex">
+            <a class="btn" href="#study/${d.id}">Study</a>
+            <button class="btn ghost danger" data-del="${d.id}">Delete</button>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  $('#create-deck').onclick = async ()=>{ const name=$('#deck-name').value.trim(); if(!name) return; const deck=newDeck(name); await dbPut('decks', deck); await loadAll(); location.hash = `deck/${deck.id}`; };
+  $$("[data-del]").forEach(btn=> btn.onclick = async ()=>{ const id = btn.getAttribute('data-del'); if(!confirm('Delete this deck and all its cards?')) return; const cards = state.cardsByDeck.get(id)||[]; for(const c of cards){ await dbDel('cards', c.id); } await dbDel('decks', id); await loadAll(); render(); });
+}
+
+function renderDeck(root, deckId){ const deck = state.decks.find(d=>d.id===deckId); const cards = (state.cardsByDeck.get(deckId)||[]).sort((a,b)=> b.updatedAt - a.updatedAt);
+  setBreadcrumb([{label:'Decks', href:'#home'}, {label:deck?deck.name:'Deck'}]);
+  root.innerHTML = `
+    <div class="flex" style="justify-content:space-between;align-items:flex-end">
+      <div>
+        <h1 class="headline">${escapeHtml(deck?.name||'Deck')}</h1>
+        <div class="muted">${cards.length} cards · Due today: ${cards.filter(c=>c.due<=now()).length}</div>
+      </div>
+      <div class="flex" style="gap:8px">
+        <a class="btn primary" href="#study/${deckId}">Start Study</a>
+        <button class="btn warn" id="reset-deck">Reset deck</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="card" style="min-width:280px;flex:1">
+        <h3>Add a card</h3>
+        <div class="spacer"></div>
+        <label>Front</label>
+        <textarea id="front"></textarea>
+        <div class="spacer"></div>
+        <label>Back</label>
+        <textarea id="back"></textarea>
+        <div class="spacer"></div>
+        <button class="btn success" id="add-card">Add</button>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <div class="list">
+      ${cards.map(c=> cardRow(c)).join('')}
+    </div>
+  `;
+  const save = async ()=>{
+    const f=$('#front').value.trim(); const b=$('#back').value.trim(); if(!f||!b) return;
+    const card = newCard(deckId, f, b); await dbPut('cards', card); await loadAll(); renderDeck(root, deckId);
+  };
+  $('#add-card').onclick = save;
+  ['front','back'].forEach(id=> $('#'+id).addEventListener('keydown', e=>{ if((e.metaKey||e.ctrlKey) && e.key==='Enter'){ save(); } }));
+  $$("[data-edit]").forEach(btn=> btn.onclick = ()=> editCard(btn.getAttribute('data-edit')));
+  $$("[data-delcard]").forEach(btn=> btn.onclick = async ()=>{ if(!confirm('Delete this card?')) return; await dbDel('cards', btn.getAttribute('data-delcard')); await loadAll(); renderDeck(root, deckId); });
+
+  // Reset deck handler: make all cards due now and clear SRS stats
+  $('#reset-deck').onclick = async ()=>{
+    if(!confirm('Reset this deck? All cards will be due now and SRS stats (interval/repetitions/ease) will be cleared.')) return;
+    const ts = Date.now();
+    const deckCards = (state.cardsByDeck.get(deckId)||[]);
+    for(const c of deckCards){
+      await dbPut('cards', { ...c, due: ts, repetitions: 0, interval: 0, ease: 2.5, updatedAt: ts });
+    }
+    await loadAll();
+    renderDeck(root, deckId);
+    alert('Deck reset complete: all cards are due now.');
+  };
+}
+
+function cardRow(c){
+  return `
+  <div class="panel" style="padding:12px">
+    <div class="flex" style="justify-content:space-between;align-items:flex-start">
+      <div>
+        <div><strong>Q:</strong> ${escapeHtml(c.front).slice(0,280)}</div>
+        <div class="muted"><strong>A:</strong> ${escapeHtml(c.back).slice(0,280)}</div>
+        <div class="muted" style="font-size:12px">rep ${c.repetitions} · ease ${c.ease.toFixed(2)} · interval ${c.interval}d · due ${new Date(c.due).toLocaleDateString()}</div>
+      </div>
+      <div class="flex">
+        <button class="btn" data-edit="${c.id}">Edit</button>
+        <button class="btn danger" data-delcard="${c.id}">Delete</button>
+      </div>
+    </div>
+  </div>`
+}
+
+async function editCard(id){ const c = await dbGet('cards', id); if(!c) return; const front = prompt('Edit front:', c.front); if(front===null) return; const back = prompt('Edit back:', c.back); if(back===null) return; await dbPut('cards', { ...c, front, back, updatedAt: now() }); await loadAll(); render(); }
+
+function renderStudy(root, deckId){ const deck = state.decks.find(d=>d.id===deckId); const cards = (state.cardsByDeck.get(deckId)||[]);
+  const due = cards.filter(c=> c.due <= now()); const queue = due.length? due : cards; // if nothing due, review all
+  let idx = 0; let flipped=false; let current = queue[idx];
+  setBreadcrumb([{label:'Decks', href:'#home'}, {label:deck?deck.name:'Deck', href:`#deck/${deckId}`}, {label:'Study'}]);
+  root.innerHTML = `
+    <div class="card" style="padding:24px">
+      <div class="flex" style="justify-content:space-between;align-items:center">
+        <div class="muted">Due: ${due.length} · Total in session: ${queue.length}</div>
+        <div style="min-width:200px" class="progress"><div id="prog" style="width:0%"></div></div>
+      </div>
+      <div class="spacer"></div>
+      <div id="face" class="center" style="min-height:160px;font-size:22px;line-height:1.4">${escapeHtml(current?.front||'No cards yet')}</div>
+      <div class="spacer"></div>
+      <div class="center"><button class="btn" id="flip">Flip (Space)</button></div>
+      <div class="spacer"></div>
+      <div class="row" style="justify-content:center">
+        <button class="btn danger" id="g0">1 · Again</button>
+        <button class="btn warn" id="g1">2 · Hard</button>
+        <button class="btn success" id="g2">3 · Good</button>
+        <button class="btn primary" id="g3">4 · Easy</button>
+      </div>
+    </div>
+  `;
+  function setProg(){ $('#prog').style.width = `${Math.round((idx/queue.length)*100)}%`; }
+  function show(){ if(!current){ $('#face').textContent='All done!'; return; } $('#face').innerHTML = escapeHtml(flipped? current.back : current.front); }
+  function next(){ idx++; flipped=false; current = queue[idx]; setProg(); show(); }
+  function grade(n){ if(!current) return; const updated = review(current, n); dbPut('cards', updated).then(async ()=>{ await loadAll(); next(); }); }
+  $('#flip').onclick = ()=>{ flipped=!flipped; show(); };
+  $('#g0').onclick = ()=>grade(0); $('#g1').onclick = ()=>grade(1); $('#g2').onclick = ()=>grade(2); $('#g3').onclick = ()=>grade(3);
+
+  // Keyboard shortcuts for study — but ignore when typing in inputs/textareas
+  document.onkeydown = (e)=>{
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+    if(e.key===' '){ e.preventDefault(); $('#flip').click(); }
+    if(['1','2','3','4'].includes(e.key)){
+      e.preventDefault();
+      grade({'1':0,'2':1,'3':2,'4':3}[e.key]);
+    }
+  };
+
+  setProg(); show();
+}
+
+// ---------- Import / Export ----------
+async function exportAll(){ const decks = await dbAll('decks'); const cards = await dbAll('cards'); const data = { version:1, exportedAt: now(), decks, cards };
+  const blob = new Blob([JSON.stringify(data,null,2)], { type:'application/json' }); const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'flashcards-export.json'; a.click(); URL.revokeObjectURL(url);
+}
+async function importAll(file){ const text = await file.text(); const data = JSON.parse(text);
+  if(!confirm('Importing will add/overwrite items with the same IDs. Continue?')) return;
+  for(const d of data.decks||[]) await dbPut('decks', d);
+  for(const c of data.cards||[]) await dbPut('cards', c);
+  await loadAll(); render(); alert('Import complete');
+}
+
+// ---------- Misc ----------
+function escapeHtml(str=''){ return str.replace(/[&<>"']/g, s=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[s])); }
+
+// ---------- Init ----------
+(async function init(){ await openDB(); await loadAll(); setTheme(state.theme);
+  $('#btn-export').onclick = exportAll;
+  $('#btn-import').onclick = ()=>{ const inp = document.createElement('input'); inp.type='file'; inp.accept='application/json'; inp.onchange = ()=> inp.files[0] && importAll(inp.files[0]); inp.click(); };
+  $('#btn-dark').onclick = ()=> setTheme(state.theme==='dark'?'light':'dark');
+  if(!location.hash) location.hash = 'home'; else render();
+})();
+</script>
+</body>
+</html>
